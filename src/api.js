@@ -51,19 +51,13 @@ app.post('/scrape', authenticateApiKey, async (req, res) => {
       return res.status(400).json({ error: 'Only AXS.com URLs are supported' });
     }
     
-    // Scrape the data
+    // Scrape and parse the data
     console.log(`Starting scrape for URL: ${url}`);
-    const scrapedData = await scrapeAxsTickets(url);
+    const tickets = await scrapeAxsTickets(url);
     
-    // Parse the scraped data
-    console.log('Parsing scraped data...');
-    const tickets = await parseAXSTickets(scrapedData);
+    // Return the tickets array
+    res.json(tickets);
     
-    // Return just the tickets array
-    res.json({
-      success: true,
-      tickets: tickets
-    });
   } catch (error) {
     console.error('Error processing request:', error);
     res.status(500).json({ 

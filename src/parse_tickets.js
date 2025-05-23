@@ -7,7 +7,7 @@ const __dirname = dirname(__filename);
 /**
  * Parse AXS ticket data from the provided data object
  * @param {Object} axsResults Object containing sections, offerSearch, and price data
- * @returns {Promise<Object>} Result object with ticket information
+ * @returns {Promise<Array>} Array of ticket objects
  */
 async function parseAXSTickets(axsResults) {
   try {
@@ -109,16 +109,8 @@ async function parseAXSTickets(axsResults) {
       }
     }
 
-    // Return the tickets array and event information
-    return {
-      tickets,
-      eventId: axsResults.eventId || '',
-      eventName: axsResults.eventName || '',
-      venueName: axsResults.venueName || '',
-      eventDate: axsResults.eventDate || '',
-      eventUrl: axsResults.url || '',
-      ticketCount: tickets.length
-    };
+    // Return just the tickets array
+    return tickets;
     
   } catch (error) {
     console.error("Error parsing AXS ticket data:", error);

@@ -527,53 +527,31 @@ async function scrapeAxsTickets(url) {
       sections: capturedResponses.get("sections") || null,
       offerSearch: capturedResponses.get("offer_search") || null,
       price: capturedResponses.get("price") || null,
-      timestamp: new Date().toISOString(),
-      url: url,
-      duration: ((Date.now() - scrapeStartTime) / 1000).toFixed(1),
-      complete: Boolean(capturedResponses.get("sections") && 
-                     capturedResponses.get("offer_search") && 
-                     capturedResponses.get("price")),
-      successful: capturedResponses.size > 0
+      url: url
     }
     
-    // If we successfully scraped the data, automatically parse the tickets
-    if (result.successful) {
-      console.log("Automatically parsing ticket data...")
+    // If we successfully scraped the data, parse the tickets
+    if (result.sections && result.offerSearch && result.price) {
+      console.log("Parsing ticket data...")
       try {
         // Parse the tickets directly using the captured data
-        const dbResult = await parseAXSTickets({
+        const tickets = await parseAXSTickets({
           sections: result.sections,
           offerSearch: result.offerSearch,
           price: result.price,
           url: url
         })
         
-        // Add the parsed data to the result
-        result.parsedTickets = {
-          count: dbResult.ticketCount,
-          eventId: dbResult.eventId
-        }
+        // Return just the tickets array
+        return tickets
         
-        console.log(`
-========================================================
-  AXS TICKET SCRAPER - DATABASE RESULTS
-========================================================
-URL: ${url}
-Event ID: ${dbResult.eventId}
-Event Name: ${dbResult.eventName}
-Venue: ${dbResult.venueName}
-Date: ${dbResult.eventDate}
-Tickets Saved: ${dbResult.ticketCount}
-Scraping Duration: ${((Date.now() - scrapeStartTime) / 1000).toFixed(1)} seconds
-========================================================
-Process completed successfully!
-        `)
       } catch (parseError) {
         console.error("Error parsing ticket data:", parseError)
+        throw parseError
       }
+    } else {
+      throw new Error("Failed to capture all required data")
     }
-    
-    return result
     
   } catch (error) {
     console.error("Main error:", error)

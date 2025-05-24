@@ -1,6 +1,7 @@
 import puppeteer from "puppeteer-core"
 import { fileURLToPath } from 'url'
 import { dirname } from 'path'
+import fs from 'fs/promises'
 // Import the parsing functions
 import { parseAXSTickets } from './parse_tickets.js'
 
@@ -81,7 +82,6 @@ const initBrowser = async (forceNew = false) => {
 // Main scraping function
 async function scrapeAxsTickets(url) {
   let page = null
-  let scrapeStartTime = Date.now()
   
   try {
     // Ensure we have a browser connection
@@ -387,40 +387,10 @@ async function scrapeAxsTickets(url) {
     // Save all captured responses before exiting
     for (const [filename, responseData] of capturedResponses.entries()) {
       try {
-        await fs.writeFile(filename, JSON.stringify(responseData, null, 2))
-        console.log(`Saved captured response to ${filename}`)
+        await fs.writeFile(filename + '.json', JSON.stringify(responseData, null, 2))
+        console.log(`Saved captured response to ${filename}.json`)
       } catch (writeError) {
         console.error(`Error saving response to ${filename}:`, writeError)
-      }
-    }
-    
-    // Process inventory responses for missing targets
-    console.log("Checking inventory responses for missing targets...")
-    for (const [url, responseText] of inventoryResponses.entries()) {
-      for (const target of targetEndpoints) {
-        if (!capturedResponses.has(target.filename)) {
-          const patternParts = target.pattern.split('*')
-          const matches = patternParts.every(part => url.includes(part))
-          
-          if (matches) {
-            try {
-              const responseJson = JSON.parse(responseText)
-              console.log(`🔄 Recovered response for ${target.filename} from inventory responses`)
-              capturedResponses.set(target.filename, responseJson)
-              
-              // Save the recovered response
-              await fs.writeFile(target.filename, JSON.stringify(responseJson, null, 2))
-              console.log(`Saved recovered response to ${target.filename}`)
-            } catch (jsonError) {
-              console.log(`⚠️ Recovered response for ${target.filename} is not valid JSON`)
-              capturedResponses.set(target.filename, responseText)
-              
-              // Save the raw text
-              await fs.writeFile(target.filename, responseText)
-              console.log(`Saved raw recovered response to ${target.filename}`)
-            }
-          }
-        }
       }
     }
     
@@ -459,11 +429,6 @@ async function scrapeAxsTickets(url) {
     } else {
       console.log("⚠️ Some responses could not be captured.")
     }
-    
-    console.log("Saving page HTML for reference...")
-    const pageHtml = await page.content()
-    await fs.writeFile('page.html', pageHtml)
-    console.log("Page HTML saved to page.html")
     
     // Create return object with the three responses
     const result = {

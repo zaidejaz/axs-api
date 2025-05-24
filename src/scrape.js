@@ -1,27 +1,12 @@
 import puppeteer from "puppeteer-core"
-import { PuppeteerScreenRecorder } from 'puppeteer-screen-recorder'
 import { fileURLToPath } from 'url'
-import { dirname, join } from 'path'
-import fs from 'fs/promises'
+import { dirname } from 'path'
 // Import the parsing functions
 import { parseAXSTickets } from './parse_tickets.js'
 
 // Get current file directory path
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
-
-// Define recordings directory
-const recordingsDir = join(__dirname, 'recordings')
-
-// Create recordings directory if it doesn't exist
-const ensureRecordingsDir = async () => {
-  try {
-    await fs.access(recordingsDir)
-  } catch (e) {
-    await fs.mkdir(recordingsDir, { recursive: true })
-    console.log(`Created recordings directory at: ${recordingsDir}`)
-  }
-}
 
 // Browser connection and management
 let browser = null
@@ -57,7 +42,7 @@ const initBrowser = async (forceNew = false) => {
       const query = new URLSearchParams({
         token: process.env.SCRAPELESS_TOKEN,
         proxy_country: "ANY",
-        session_recording: true,
+        session_recording: false,
         session_ttl: 900,
         session_name: "AXS Scraper API",
       })
@@ -95,7 +80,6 @@ const initBrowser = async (forceNew = false) => {
 
 // Main scraping function
 async function scrapeAxsTickets(url) {
-  let recorder = null
   let page = null
   let scrapeStartTime = Date.now()
   
@@ -105,42 +89,6 @@ async function scrapeAxsTickets(url) {
     
     // Create page first
     page = await browser.newPage()
-    
-    // Only setup recording in development environment
-    const isDevelopment = process.env.NODE_ENV === 'development'
-    
-    if (isDevelopment) {
-      // Ensure recordings directory exists
-      await ensureRecordingsDir()
-      
-      // Configure screen recorder
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-      const recordingConfig = {
-        followNewTab: true,
-        fps: 25,
-        ffmpeg_Path: null,
-        videoFrame: {
-          width: 1920,
-          height: 1080
-        },
-        aspectRatio: '16:9',
-        recordDurationLimit: 300,
-        alwaysCreateNewFile: true,
-        videoCodec: 'libx264',
-        videoBitrate: 8000,
-        autopad: {
-          color: 'black',
-          width: 1920,
-          height: 1080
-        }
-      }
-      
-      // Initialize recorder with the created page
-      recorder = new PuppeteerScreenRecorder(page, recordingConfig)
-      const recordingPath = join(recordingsDir, `session-${timestamp}.mp4`)
-      console.log(`Starting screen recording to: ${recordingPath}`)
-      await recorder.start(recordingPath)
-    }
     
     // Target XHR endpoints we want to capture
     const targetEndpoints = [
@@ -354,9 +302,6 @@ async function scrapeAxsTickets(url) {
       await captureWithTimeout(15000).catch(async () => {
         console.log("Not all responses available yet. Proceeding with refresh...")
         
-        // Screenshot for debugging
-        await page.screenshot({ path: "scrapeless-cloudflareTurnstile-screenshot.png", fullPage: true })
-        
         console.log("Page loaded...")
         
         // Wait a moment for the page to fully render post-captcha
@@ -398,8 +343,6 @@ async function scrapeAxsTickets(url) {
           console.log("Could not find refresh button - trying to reload the page")
           await page.reload({ waitUntil: "networkidle2" })
         }
-        
-        await page.screenshot({ path: "scrapeless-after-refresh.png", fullPage: true })
         
         // Now wait for responses after refresh (with longer timeout)
         console.log("Waiting for target responses after page refresh...")
@@ -557,17 +500,6 @@ async function scrapeAxsTickets(url) {
     console.error("Main error:", error)
     throw error 
   } finally {
-    // Stop recording before closing the browser
-    if (recorder) {
-      try {
-        console.log("Stopping screen recording...")
-        await recorder.stop()
-        console.log("Screen recording stopped successfully")
-      } catch (recorderError) {
-        console.error("Error stopping recorder:", recorderError)
-      }
-    }
-    
     // Safely close the page
     if (page) {
       try {

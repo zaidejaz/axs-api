@@ -5,6 +5,153 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 /**
+ * Helper function to build a map of price levels with their calculated pricing.
+ * @param {Object} axsResults Object containing price data.
+ * @returns {Object} Map of priceLevelID to price data.
+ */
+function buildPriceLevelsMap(axsResults) {
+  const priceLevelsMap = {};
+  console.log('Building price levels map...');
+
+  // Map global fees for easier lookup (from root-level fees array)
+  const rootFeeMap = {};
+  if (axsResults.price && axsResults.price.fees && Array.isArray(axsResults.price.fees)) {
+    for (const fee of axsResults.price.fees) {
+      rootFeeMap[fee.name] = fee;
+    }
+  }
+
+  // Map global taxes for easier lookup
+  const taxMap = {};
+  if (axsResults.price && axsResults.price.taxes && Array.isArray(axsResults.price.taxes)) {
+    for (const tax of axsResults.price.taxes) {
+      taxMap[tax.id] = tax;
+    }
+  }
+
+  if (axsResults.price && axsResults.price.offerPrices) {
+    for (const offerPrice of axsResults.price.offerPrices) {
+      if (offerPrice.zonePrices) {
+        for (const zonePrice of offerPrice.zonePrices) {
+          if (zonePrice.priceLevels) {
+            for (const priceLevel of zonePrice.priceLevels) {
+              if (!priceLevel.prices || priceLevel.prices.length === 0) {
+                console.warn(`Price level ${priceLevel.label} (${priceLevel.priceLevelID}) has no detailed prices. Skipping.`);
+                continue;
+              }
+
+              const priceLevelData = {
+                priceLevelID: priceLevel.priceLevelID,
+                label: priceLevel.label,
+                basePrice: 0, // Base Component
+                facilityFee: 0, // VEN_FacFee
+                totalFees: 0, // All applicable fees from root-level
+                totalTax: 0, // Calculated tax
+                websiteDisplayPrice: 0,
+              };
+
+              // The 'base' field at priceLevel.prices[0] seems to be Base Component + VEN_FacFee
+              // This is the amount *before* the root-level fees and taxes are applied to it.
+              const baseAmountForFeeCalculation = priceLevel.prices[0].base; // e.g., 19950 for PL1
+
+              // Extract individual price components and identify their taxability
+              let baseComponentAmount = 0;
+              let venFacFeeAmount = 0;
+              let currentTaxableAmount = 0; // Amount on which tax is applied
+
+              const priceComponents = priceLevel.prices[0].priceComponents;
+              if (priceComponents) {
+                for (const comp of priceComponents) {
+                  if (comp.name === "Base Component") {
+                    baseComponentAmount = comp.amount;
+                  } else if (comp.name === "VEN_FacFee") {
+                    venFacFeeAmount = comp.amount;
+                  }
+                  // If this price component is taxable, add its amount to the taxable sum
+                  if (comp.taxIds && comp.taxIds.includes("1001")) { // Check for taxId '1001' (LET)
+                    currentTaxableAmount += comp.amount;
+                  }
+                }
+              }
+
+              priceLevelData.basePrice = baseComponentAmount;
+              priceLevelData.facilityFee = venFacFeeAmount;
+
+              let totalCalculatedFees = 0; // Sum of all fees (service, convenience, order processing from root-level)
+
+              // --- Process root-level fees ---
+              for (const feeName in rootFeeMap) {
+                const feeDef = rootFeeMap[feeName];
+                // Check if this fee definition applies to the current offer (offerID) or offerGroupID
+                // For simplicity, let's assume it applies to all for now as the 'assignments' array is complex.
+                // Or, more accurately, we'd need to link offerPrice.offerID to fee.assignments.associatedWith.
+                // Given the user's observed "Actual Price" includes these fees, they are likely universally applied or apply to 'Regular' offer.
+                // Let's iterate through its components
+                if (feeDef.components && Array.isArray(feeDef.components)) {
+                  for (const component of feeDef.components) {
+                    let feeComponentAmount = 0;
+                    const priceInDollars = baseAmountForFeeCalculation / 100; // Convert to dollars for lookup ranges
+
+                    if (component.calculationMethod === "Lookup" && Array.isArray(component.lookupRanges)) {
+                      // Find the correct amount based on the base price (in dollars)
+                      for (const range of component.lookupRanges) {
+                        if (priceInDollars >= range.start && (range.end === 0 || priceInDollars < range.end)) {
+                          feeComponentAmount = range.amount;
+                          break;
+                        }
+                      }
+                    } else if (component.calculationMethod === "Percentage" && typeof component.rate === 'number') {
+                      feeComponentAmount = (baseAmountForFeeCalculation * component.rate) / 100;
+                      if (typeof component.roundOff === 'number') {
+                        feeComponentAmount = Math.round(feeComponentAmount / component.roundOff) * component.roundOff;
+                      }
+                    }
+
+                    totalCalculatedFees += feeComponentAmount;
+
+                    // If this fee component is taxable, add its amount to the taxable sum
+                    if (component.taxIds && component.taxIds.includes("1001")) { // Check for taxId '1001' (LET)
+                      currentTaxableAmount += feeComponentAmount;
+                    }
+                  }
+                }
+              }
+
+              priceLevelData.totalFees = totalCalculatedFees;
+
+              // --- Calculate Total Tax ---
+              let globalTaxRate = 0;
+              const letTaxDef = taxMap["1001"]; // Get the 'LET' tax definition
+              if (letTaxDef) {
+                globalTaxRate = letTaxDef.rate;
+              }
+
+              priceLevelData.totalTax = (currentTaxableAmount * globalTaxRate) / 100;
+
+              // --- Calculate Website Display Price ---
+              // websiteDisplayPrice = (Base Component + VEN_FacFee) + total_calculated_fees + total_tax
+              priceLevelData.websiteDisplayPrice = baseAmountForFeeCalculation + totalCalculatedFees + priceLevelData.totalTax;
+
+
+              console.log(`Price Level ${priceLevel.label} (${priceLevel.priceLevelID}):`);
+              console.log(`  Base + Fac Fee: $${(baseAmountForFeeCalculation / 100).toFixed(2)}`);
+              console.log(`  Calculated Fees: $${(totalCalculatedFees / 100).toFixed(2)}`);
+              console.log(`  Taxable Amount: $${(currentTaxableAmount / 100).toFixed(2)}`);
+              console.log(`  Total Tax: $${(priceLevelData.totalTax / 100).toFixed(2)} (at ${globalTaxRate}%)`);
+              console.log(`  Website Display Price: $${(priceLevelData.websiteDisplayPrice / 100).toFixed(2)}`);
+
+              priceLevelsMap[priceLevel.priceLevelID] = priceLevelData;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return priceLevelsMap;
+}
+
+/**
  * Parse AXS ticket data from the provided data object
  * @param {Object} axsResults Object containing sections, offerSearch, and price data
  * @returns {Promise<Array>} Array of ticket objects
@@ -12,322 +159,98 @@ const __dirname = dirname(__filename);
 async function parseAXSTickets(axsResults) {
   try {
     console.log('Parsing ticket data from provided object');
-    
+
     // Initialize tickets array
     const tickets = [];
-    
+
     // Build price level mapping with accurate pricing
     const priceLevelsMap = buildPriceLevelsMap(axsResults);
     console.log(`Found ${Object.keys(priceLevelsMap).length} price levels in price data`);
-    
+
     // If we have detailed offer data, process that for specific seats
     if (axsResults.offerSearch && axsResults.offerSearch.offers) {
       console.log(`Processing ${axsResults.offerSearch.offers.length} offers with detailed seat information...`);
-      
+
       // Process each offer in the offer search data
       for (const offer of axsResults.offerSearch.offers) {
-        // Skip offers without items
+        // Skip offers without items or if items is not an array or is empty
         if (!offer.items || !Array.isArray(offer.items) || offer.items.length === 0) {
           continue;
         }
-        
+
         // Group seats by section and row AND price level (to ensure same price)
         const sectionRowPriceSeats = {};
-        
+
         // Process each seat (item) in the offer
         for (const item of offer.items) {
-          // Key includes price level to ensure pairs have same price
-          const sectionKey = `${item.sectionLabel}|${item.rowLabel}|${item.priceLevelID}`;
-          
-          // Initialize this section/row/price if it doesn't exist yet
-          if (!sectionRowPriceSeats[sectionKey]) {
-            sectionRowPriceSeats[sectionKey] = {
-              section: item.sectionLabel,
-              row: item.rowLabel,
-              seats: [],
-              priceLevelID: item.priceLevelID
-            };
-          }
-          
-          // Add this seat to the section/row/price
-          sectionRowPriceSeats[sectionKey].seats.push(item.number);
-        }
-        
-        // Now create tickets from the grouped seats, creating pairs of 2-4 seats
-        for (const [key, groupData] of Object.entries(sectionRowPriceSeats)) {
-          // Sort seats numerically for better pairing
-          groupData.seats.sort((a, b) => {
-            // Sort numerically if possible, otherwise alphabetically
-            const numA = parseInt(a, 10);
-            const numB = parseInt(b, 10);
-            return (isNaN(numA) || isNaN(numB)) ? a.localeCompare(b) : numA - numB;
-          });
-          
-          // Get price level info
-          const priceLevelDetails = priceLevelsMap[groupData.priceLevelID] || null;
-          if (!priceLevelDetails) {
-            console.warn(`Warning: No price details found for price level ${groupData.priceLevelID} in ${groupData.section} row ${groupData.row}`);
+          // Skip if not available or if it's accessible/restricted view
+          if (item.statusCodeLabel !== "Available" || 
+              item.attributes?.some(attr => 
+                attr.toLowerCase().includes('restricted') || 
+                attr.toLowerCase().includes('accessible')
+              )) {
             continue;
           }
-          
-          // Calculate pricing
-          const facePrice = priceLevelDetails.base;
-          const facilityFee = priceLevelDetails.facilityFee || 0;
-          const taxRate = priceLevelDetails.taxRate || 0;
-          const serviceFeeRate = priceLevelDetails.serviceFeeRate || 0;
-          const convenienceFeeRate = priceLevelDetails.convenienceFeeRate || 0;
-          const orderProcessingFee = priceLevelDetails.orderProcessingFee || 0;
-          
-          // Calculate fees
-          const serviceFee = (facePrice * serviceFeeRate) / 100;
-          const convenienceFee = (facePrice * convenienceFeeRate) / 100;
-          const totalFeeBeforeTax = facilityFee + serviceFee + convenienceFee + orderProcessingFee;
-          
-          // Calculate tax amount (tax is applied to base price + fees)
-          const taxAmount = ((facePrice + totalFeeBeforeTax) * taxRate) / 100;
-          
-          // Calculate total cost
-          const totalCost = facePrice + totalFeeBeforeTax + taxAmount;
-          
-          // Find contiguous seat groups (2-4 seats)
-          const seatGroups = findContiguousSeatGroups(groupData.seats, 2, 4);
-          
-          // Create tickets for each valid seat group
-          for (const seatGroup of seatGroups) {
-            // Create a ticket for this group
-            tickets.push({
-              section: groupData.section,
-              row: groupData.row,
-              seats: seatGroup.join(','),
-              quantity: seatGroup.length,
-              face_price: parseFloat(facePrice.toFixed(2)),
-              taxed_cost: parseFloat(taxAmount.toFixed(2)),
-              cost: parseFloat(totalCost.toFixed(2))
-            });
+
+          const sectionId = item.sectionID;
+          const rowLabel = item.rowLabel;
+          const priceLevelId = item.priceLevelID;
+
+          const key = `${sectionId}-${rowLabel}-${priceLevelId}`;
+
+          if (!sectionRowPriceSeats[key]) {
+            sectionRowPriceSeats[key] = {
+              sectionLabel: item.sectionLabel,
+              rowLabel: rowLabel,
+              priceLevelId: priceLevelId,
+              seatNumbers: [],
+              totalTickets: 0
+            };
           }
+          sectionRowPriceSeats[key].seatNumbers.push(item.number);
+          sectionRowPriceSeats[key].totalTickets++;
+        }
+
+        // Now process the grouped seats
+        for (const key in sectionRowPriceSeats) {
+          const groupedSeats = sectionRowPriceSeats[key];
+
+          const priceLevelData = priceLevelsMap[groupedSeats.priceLevelId];
+          if (!priceLevelData) {
+            console.warn(`Price level data not found for ID: ${groupedSeats.priceLevelId}. Skipping grouped seats.`);
+            continue;
+          }
+
+          // Sort seat numbers for cleaner output
+          groupedSeats.seatNumbers.sort((a, b) => parseInt(a) - parseInt(b));
+
+          // Calculate prices in dollars (convert from cents)
+          const face_price = priceLevelData.basePrice / 100;
+          const taxed_cost = (priceLevelData.totalFees + priceLevelData.totalTax) / 100;
+          const cost = face_price + taxed_cost;
+
+          // Add to tickets array with new price structure
+          tickets.push({
+            section: groupedSeats.sectionLabel,
+            row: groupedSeats.rowLabel,
+            seats: groupedSeats.seatNumbers.join(','),
+            quantity: groupedSeats.totalTickets,
+            face_price: parseFloat(face_price.toFixed(2)),
+            taxed_cost: parseFloat(taxed_cost.toFixed(2)),
+            cost: parseFloat(cost.toFixed(2))
+          });
         }
       }
     }
 
-    // Return just the tickets array
+    console.log(`Finished parsing. Total tickets generated: ${tickets.length}`);
     return tickets;
-    
+
   } catch (error) {
-    console.error("Error parsing AXS ticket data:", error);
+    console.error('Error during ticket parsing:', error);
     throw error;
   }
 }
 
-/**
- * Find contiguous seat groups that match specific size criteria
- * @param {Array} seats Array of seat numbers
- * @param {number} minSize Minimum size of a seat group (2 for pairs)
- * @param {number} maxSize Maximum size of a seat group (4 for quads)
- * @returns {Array} Array of seat groups that match the criteria
- */
-function findContiguousSeatGroups(seats, minSize = 2, maxSize = 4) {
-  const groups = [];
-  const numericSeats = [];
-  
-  // Convert all seats to numbers if possible, otherwise use string comparison
-  for (const seat of seats) {
-    const seatNum = parseInt(seat, 10);
-    numericSeats.push(isNaN(seatNum) ? seat : seatNum);
-  }
-  
-  // Find contiguous groups
-  let currentGroup = [seats[0]];
-  let currentVal = numericSeats[0];
-  
-  for (let i = 1; i < seats.length; i++) {
-    const nextVal = numericSeats[i];
-    
-    // Check if seats are contiguous by comparing numeric values
-    if (typeof currentVal === 'number' && typeof nextVal === 'number' && nextVal === currentVal + 1) {
-      currentGroup.push(seats[i]);
-      currentVal = nextVal;
-    } 
-    // If using string comparison (for non-numeric seats), check if they are alphabetically adjacent
-    else if (typeof currentVal === 'string' && typeof nextVal === 'string' && 
-             nextVal.charCodeAt(0) === currentVal.charCodeAt(0) + 1) {
-      currentGroup.push(seats[i]);
-      currentVal = nextVal;
-    } 
-    // Start a new group if not contiguous
-    else {
-      // Save the current group if it meets size criteria
-      if (currentGroup.length >= minSize && currentGroup.length <= maxSize) {
-        groups.push([...currentGroup]);
-      }
-      currentGroup = [seats[i]];
-      currentVal = nextVal;
-    }
-  }
-  
-  // Don't forget to check the last group
-  if (currentGroup.length >= minSize && currentGroup.length <= maxSize) {
-    groups.push(currentGroup);
-  }
-  
-  return groups;
-}
-
-/**
- * Build a mapping of price levels to their details from the AXS results
- * @param {Object} axsResults The AXS results data
- * @returns {Object} Map of price level IDs to their details
- */
-function buildPriceLevelsMap(axsResults) {
-  const priceLevelsMap = {};
-  
-  // Extract tax rates
-  const taxes = {};
-  if (axsResults.price && axsResults.price.taxes) {
-    for (const tax of axsResults.price.taxes) {
-      taxes[tax.id] = tax.rate;
-      console.log(`Found tax: ${tax.name} with rate ${tax.rate}%`);
-    }
-  }
-  
-  // Debug: Log all fees for examination
-  if (axsResults.price && axsResults.price.fees) {
-    console.log("All available fees in axs_results:");
-    for (const fee of axsResults.price.fees) {
-      console.log(`Fee ID: ${fee.id}, Name: ${fee.name}, Method: ${fee.calculationMethod}, Rate/Amount: ${fee.rate || fee.amount || 'N/A'}`);
-    }
-  }
-  
-  // Extract fees that apply at the offer level
-  let serviceFeeRate = 0;
-  let orderProcessingFee = 0;
-  let convenienceFeeRate = 0;
-  
-  // Try to find service and processing fees in the offerPrices.fees section
-  if (axsResults.price && axsResults.price.offerPrices) {
-    // Check for any global fees referenced by the offers
-    const feeIds = new Set();
-    
-    for (const offer of axsResults.price.offerPrices) {
-      if (offer.fees) {
-        for (const fee of offer.fees) {
-          feeIds.add(fee.id);
-        }
-      }
-    }
-    
-    console.log(`Offer references fee IDs: ${Array.from(feeIds).join(', ')}`);
-    
-    // Now look for these fees in the global fees section
-    if (axsResults.price.fees) {
-      for (const fee of axsResults.price.fees) {
-        if (feeIds.has(fee.id)) {
-          if (fee.name.includes('Service') || fee.name.includes('SVC')) {
-            // This is likely a percentage-based service fee
-            if (fee.calculationMethod === 'Percentage') {
-              serviceFeeRate = fee.rate || 0;
-              console.log(`Found service fee rate: ${serviceFeeRate}%`);
-            }
-          } else if (fee.name.includes('Process') || fee.name.includes('Order')) {
-            // This is likely a fixed order processing fee
-            if (fee.amount) {
-              orderProcessingFee = fee.amount / 100; // Convert cents to dollars
-              console.log(`Found order processing fee: $${orderProcessingFee}`);
-            }
-          } else if (fee.name.includes('Convenience') || fee.name.includes('CONV')) {
-            // This is likely a percentage-based convenience fee
-            if (fee.calculationMethod === 'Percentage') {
-              convenienceFeeRate = fee.rate || 0;
-              console.log(`Found convenience fee rate: ${convenienceFeeRate}%`);
-            }
-          }
-        }
-      }
-    }
-  }
-  
-  // If we couldn't find fees referenced by offers, set some default values based on common practice
-  if (serviceFeeRate === 0 && convenienceFeeRate === 0) {
-    console.log("No fee rates found in offer data, using default AXS fee structure");
-    // AXS typically has a service fee of about 15-20% of the ticket price
-    serviceFeeRate = 16.5;
-    // Convenience fee is typically around 3-5%
-    convenienceFeeRate = 3.5;
-  }
-  
-  console.log(`Using fee rates: Service ${serviceFeeRate}%, Convenience ${convenienceFeeRate}%, Order Processing $${orderProcessingFee}`);
-  
-  // Process price data to get face values for each price level
-  if (axsResults.price && axsResults.price.offerPrices) {
-    for (const offer of axsResults.price.offerPrices) {
-      for (const zonePrice of offer.zonePrices) {
-        for (const priceLevel of zonePrice.priceLevels) {
-          for (const price of priceLevel.prices) {
-            // Initialize price level data
-            const priceLevelData = {
-              label: priceLevel.label,
-              base: price.base / 100, // Convert cents to dollars
-              priceTypeID: price.priceTypeID,
-              facilityFee: 0,
-              serviceFeeRate: serviceFeeRate,
-              convenienceFeeRate: convenienceFeeRate,
-              orderProcessingFee: orderProcessingFee,
-              taxRate: 0,
-              totalFees: 0,
-              websiteDisplayPrice: 0
-            };
-            
-            // Process price components to extract facility fees and taxes
-            if (price.priceComponents) {
-              for (const component of price.priceComponents) {
-                if (!component.base && component.name.includes('Fee')) {
-                  // This is a facility fee
-                  priceLevelData.facilityFee += component.amount / 100; // Convert cents to dollars
-                }
-                
-                // Get tax rate for this component
-                if (component.taxIds && component.taxIds.length > 0) {
-                  for (const taxId of component.taxIds) {
-                    if (taxes[taxId]) {
-                      priceLevelData.taxRate = Math.max(priceLevelData.taxRate, taxes[taxId]);
-                    }
-                  }
-                }
-              }
-            }
-            
-            // Calculate total fees and website display price
-            const basePrice = priceLevelData.base;
-            const facilityFee = priceLevelData.facilityFee;
-            
-            // Calculate service fee (percentage of base price)
-            const serviceFee = (basePrice * serviceFeeRate) / 100;
-            
-            // Calculate convenience fee (percentage of base price)
-            const convenienceFee = (basePrice * convenienceFeeRate) / 100;
-            
-            // Sum all fees
-            const totalFeeBeforeTax = facilityFee + serviceFee + convenienceFee + orderProcessingFee;
-            priceLevelData.totalFees = totalFeeBeforeTax;
-            
-            // Apply tax to everything
-            const totalTax = ((basePrice + totalFeeBeforeTax) * priceLevelData.taxRate) / 100;
-            
-            // Calculate website display price (base + all fees + tax)
-            priceLevelData.websiteDisplayPrice = basePrice + totalFeeBeforeTax + totalTax;
-            
-            // Log the detailed price breakdown for debugging
-            console.log(`Price level ${priceLevel.label} (${priceLevel.priceLevelID}): Base $${basePrice.toFixed(2)} + Fees $${totalFeeBeforeTax.toFixed(2)} + Tax $${totalTax.toFixed(2)} = Total $${priceLevelData.websiteDisplayPrice.toFixed(2)}`);
-            
-            // Store the price level data
-            priceLevelsMap[priceLevel.priceLevelID] = priceLevelData;
-          }
-        }
-      }
-    }
-  }
-  
-  return priceLevelsMap;
-}
-
 // Export only the parseAXSTickets function
-export { parseAXSTickets }; 
+export { parseAXSTickets };

@@ -171,17 +171,15 @@ async function parseAXSTickets(axsResults) {
     if (axsResults.offerSearch && axsResults.offerSearch.offers) {
       console.log(`Processing ${axsResults.offerSearch.offers.length} offers with detailed seat information...`);
 
-      // Process each offer in the offer search data
+      // Group seats by section, row, and price level
+      const sectionRowPriceSeats = {};
+
+      // First pass: Collect all valid seats
       for (const offer of axsResults.offerSearch.offers) {
-        // Skip offers without items or if items is not an array or is empty
         if (!offer.items || !Array.isArray(offer.items) || offer.items.length === 0) {
           continue;
         }
 
-        // Group seats by section and row AND price level (to ensure same price)
-        const sectionRowPriceSeats = {};
-
-        // Process each seat (item) in the offer
         for (const item of offer.items) {
           // Skip if not available or if it's accessible/restricted view
           if (item.statusCodeLabel !== "Available" || 
@@ -192,53 +190,83 @@ async function parseAXSTickets(axsResults) {
             continue;
           }
 
-          const sectionId = item.sectionID;
-          const rowLabel = item.rowLabel;
-          const priceLevelId = item.priceLevelID;
-
-          const key = `${sectionId}-${rowLabel}-${priceLevelId}`;
-
+          const key = `${item.sectionID}-${item.rowLabel}-${item.priceLevelID}`;
+          
           if (!sectionRowPriceSeats[key]) {
             sectionRowPriceSeats[key] = {
               sectionLabel: item.sectionLabel,
-              rowLabel: rowLabel,
-              priceLevelId: priceLevelId,
-              seatNumbers: [],
-              totalTickets: 0
+              rowLabel: item.rowLabel,
+              priceLevelId: item.priceLevelID,
+              seats: []
             };
           }
-          sectionRowPriceSeats[key].seatNumbers.push(item.number);
-          sectionRowPriceSeats[key].totalTickets++;
+
+          sectionRowPriceSeats[key].seats.push({
+            number: parseInt(item.number),
+            offerId: offer.offerID
+          });
+        }
+      }
+
+      // Second pass: Process each section-row group to find valid pairs
+      for (const key in sectionRowPriceSeats) {
+        const group = sectionRowPriceSeats[key];
+        const priceLevelData = priceLevelsMap[group.priceLevelId];
+        
+        if (!priceLevelData) {
+          console.warn(`Price level data not found for ID: ${group.priceLevelId}. Skipping seats.`);
+          continue;
         }
 
-        // Now process the grouped seats
-        for (const key in sectionRowPriceSeats) {
-          const groupedSeats = sectionRowPriceSeats[key];
+        // Sort seats by number
+        group.seats.sort((a, b) => a.number - b.number);
 
-          const priceLevelData = priceLevelsMap[groupedSeats.priceLevelId];
-          if (!priceLevelData) {
-            console.warn(`Price level data not found for ID: ${groupedSeats.priceLevelId}. Skipping grouped seats.`);
-            continue;
+        // Find consecutive groups
+        const consecutiveGroups = [];
+        let currentGroup = [group.seats[0]];
+
+        for (let i = 1; i < group.seats.length; i++) {
+          const currentSeat = group.seats[i];
+          const previousSeat = group.seats[i - 1];
+
+          if (currentSeat.number === previousSeat.number + 1) {
+            // Seat is consecutive
+            currentGroup.push(currentSeat);
+          } else {
+            // Break in consecutive seats
+            if (currentGroup.length >= 2) {
+              consecutiveGroups.push([...currentGroup]);
+            }
+            currentGroup = [currentSeat];
           }
+        }
 
-          // Sort seat numbers for cleaner output
-          groupedSeats.seatNumbers.sort((a, b) => parseInt(a) - parseInt(b));
+        // Add the last group if it's valid
+        if (currentGroup.length >= 2) {
+          consecutiveGroups.push(currentGroup);
+        }
 
-          // Calculate prices in dollars (convert from cents)
-          const face_price = priceLevelData.basePrice / 100;
-          const taxed_cost = (priceLevelData.totalFees + priceLevelData.totalTax) / 100;
-          const cost = face_price + taxed_cost;
+        // Process consecutive groups
+        for (const group of consecutiveGroups) {
+          // Process groups of 2-4 seats
+          if (group.length >= 2) {
+            // Take up to 4 seats
+            const seatGroup = group.slice(0, Math.min(4, group.length));
+            // Calculate prices
+            const face_price = priceLevelData.basePrice / 100;
+            const taxed_cost = (priceLevelData.totalFees + priceLevelData.totalTax) / 100;
+            const cost = face_price + taxed_cost;
 
-          // Add to tickets array with new price structure
-          tickets.push({
-            section: groupedSeats.sectionLabel,
-            row: groupedSeats.rowLabel,
-            seats: groupedSeats.seatNumbers.join(','),
-            quantity: groupedSeats.totalTickets,
-            face_price: parseFloat(face_price.toFixed(2)),
-            taxed_cost: parseFloat(taxed_cost.toFixed(2)),
-            cost: parseFloat(cost.toFixed(2))
-          });
+            tickets.push({
+              section: group.sectionLabel,
+              row: group.rowLabel,
+              seats: seatGroup.map(s => s.number).join(','),
+              quantity: seatGroup.length,
+              face_price: parseFloat(face_price.toFixed(2)),
+              taxed_cost: parseFloat(taxed_cost.toFixed(2)),
+              cost: parseFloat(cost.toFixed(2))
+            });
+          }
         }
       }
     }

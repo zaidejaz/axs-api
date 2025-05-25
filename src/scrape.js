@@ -4,6 +4,7 @@ import { dirname } from 'path'
 import fs from 'fs/promises'
 // Import the parsing functions
 import { parseAXSTickets } from './parse_tickets.js'
+import { randomUUID } from "crypto"
 
 // Get current file directory path
 const __filename = fileURLToPath(import.meta.url)
@@ -45,7 +46,7 @@ const initBrowser = async (forceNew = false) => {
         proxy_country: "ANY",
         session_recording: false,
         session_ttl: 900,
-        session_name: "AXS Scraper API",
+        session_name: randomUUID(),
       })
 
       const connectionURL = `wss://browser.scrapeless.com/browser?${query.toString()}`

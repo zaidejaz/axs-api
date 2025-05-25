@@ -210,24 +210,24 @@ async function parseAXSTickets(axsResults) {
 
       // Second pass: Process each section-row group to find valid pairs
       for (const key in sectionRowPriceSeats) {
-        const group = sectionRowPriceSeats[key];
-        const priceLevelData = priceLevelsMap[group.priceLevelId];
+        const groupData = sectionRowPriceSeats[key];
+        const priceLevelData = priceLevelsMap[groupData.priceLevelId];
         
         if (!priceLevelData) {
-          console.warn(`Price level data not found for ID: ${group.priceLevelId}. Skipping seats.`);
+          console.warn(`Price level data not found for ID: ${groupData.priceLevelId}. Skipping seats.`);
           continue;
         }
 
         // Sort seats by number
-        group.seats.sort((a, b) => a.number - b.number);
+        groupData.seats.sort((a, b) => a.number - b.number);
 
         // Find consecutive groups
         const consecutiveGroups = [];
-        let currentGroup = [group.seats[0]];
+        let currentGroup = [groupData.seats[0]];
 
-        for (let i = 1; i < group.seats.length; i++) {
-          const currentSeat = group.seats[i];
-          const previousSeat = group.seats[i - 1];
+        for (let i = 1; i < groupData.seats.length; i++) {
+          const currentSeat = groupData.seats[i];
+          const previousSeat = groupData.seats[i - 1];
 
           if (currentSeat.number === previousSeat.number + 1) {
             // Seat is consecutive
@@ -247,21 +247,21 @@ async function parseAXSTickets(axsResults) {
         }
 
         // Process consecutive groups
-        for (const group of consecutiveGroups) {
+        for (const seatGroup of consecutiveGroups) {
           // Process groups of 2-4 seats
-          if (group.length >= 2) {
+          if (seatGroup.length >= 2) {
             // Take up to 4 seats
-            const seatGroup = group.slice(0, Math.min(4, group.length));
+            const selectedSeats = seatGroup.slice(0, Math.min(4, seatGroup.length));
             // Calculate prices
             const face_price = priceLevelData.basePrice / 100;
             const taxed_cost = (priceLevelData.totalFees + priceLevelData.totalTax) / 100;
             const cost = face_price + taxed_cost;
 
             tickets.push({
-              section: group.sectionLabel,
-              row: group.rowLabel,
-              seats: seatGroup.map(s => s.number).join(','),
-              quantity: seatGroup.length,
+              section: groupData.sectionLabel,
+              row: groupData.rowLabel,
+              seats: selectedSeats.map(s => s.number).join(','),
+              quantity: selectedSeats.length,
               face_price: parseFloat(face_price.toFixed(2)),
               taxed_cost: parseFloat(taxed_cost.toFixed(2)),
               cost: parseFloat(cost.toFixed(2))

@@ -310,6 +310,16 @@ async function scrapeAxsTickets(url) {
         await page.waitForSelector(".header", { timeout: 10000 }).catch(err => {
           console.log("Header wait error (continuing anyway):", err.message)
         })
+
+        // Check for blocking modal
+        const blockingModal = await page.$('.modal-header h1#title');
+        if (blockingModal) {
+          const modalText = await page.evaluate(el => el.textContent, blockingModal);
+          if (modalText.includes('Oh no!')) {
+            console.error("❌ Scraper has been blocked - detected blocking modal");
+            throw new Error("Scraper has been blocked by AXS");
+          }
+        }
         
         console.log("Looking for and trying to click the Refresh button...")
         

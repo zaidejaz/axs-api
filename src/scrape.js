@@ -10,82 +10,51 @@ import { randomUUID } from "crypto"
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
-// Browser connection and management
-let browser = null
-let browserIsConnecting = false
-
-const initBrowser = async (forceNew = false) => {
-  if (browserIsConnecting) {
-    console.log("Browser connection already in progress, waiting...")
-    // Wait for current connection attempt to finish
-    while (browserIsConnecting) {
-      await new Promise(resolve => setTimeout(resolve, 500))
-    }
-    if (browser && browser.isConnected()) {
-      return browser
-    }
-  }
-
+const initBrowser = async () => {
   try {
-    browserIsConnecting = true
-    
-    // Close existing browser if it exists and we're forcing a new one
-    if (forceNew && browser) {
-      try {
-        await browser.close().catch(e => console.log('Error closing old browser:', e.message))
-      } catch (err) {
-        console.log('Could not close previous browser:', err.message)
-      }
-      browser = null
-    }
-    
-    // If no browser or not connected, create a new one
-    if (!browser || !browser.isConnected()) {
-      const query = new URLSearchParams({
-        token: process.env.SCRAPELESS_TOKEN,
-        proxy_country: "ANY",
-        session_recording: false,
-        session_ttl: 900,
-        session_name: randomUUID(),
-      })
+    const query = new URLSearchParams({
+      token: process.env.SCRAPELESS_TOKEN,
+      proxy_country: "US",
+      session_recording: true,
+      session_ttl: 900,
+      session_name: randomUUID(), // Generate unique session name for each request
+    })
 
-      const connectionURL = `wss://browser.scrapeless.com/browser?${query.toString()}`
+    const connectionURL = `wss://browser.scrapeless.com/browser?${query.toString()}`
 
-      console.log("Connecting to browser...")
-      
-      // Add timeout handling for the browser connection
-      const browserPromise = puppeteer.connect({
-        browserWSEndpoint: connectionURL,
-        defaultViewport: null,
-      })
-      
-      // Add a timeout for browser connection
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => {
-          reject(new Error('Browser connection timeout after 30 seconds'))
-        }, 30000)
-      })
-      
-      // Race the connection against the timeout
-      browser = await Promise.race([browserPromise, timeoutPromise])
-      console.log("Browser connected successfully")
-    }
+    console.log("Connecting to browser...")
+    
+    // Add timeout handling for the browser connection
+    const browserPromise = puppeteer.connect({
+      browserWSEndpoint: connectionURL,
+      defaultViewport: null,
+    })
+    
+    // Add a timeout for browser connection
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error('Browser connection timeout after 30 seconds'))
+      }, 30000)
+    })
+    
+    // Race the connection against the timeout
+    const browser = await Promise.race([browserPromise, timeoutPromise])
+    console.log("Browser connected successfully")
     
     return browser
   } catch (error) {
     console.error("Error initializing browser:", error)
     throw new Error(`Browser connection failed: ${error.message}`)
-  } finally {
-    browserIsConnecting = false
   }
 }
 
 // Main scraping function
 async function scrapeAxsTickets(url) {
+  let browser = null
   let page = null
   
   try {
-    // Ensure we have a browser connection
+    // Create new browser instance for this request
     browser = await initBrowser()
     
     // Create page first
@@ -476,13 +445,21 @@ async function scrapeAxsTickets(url) {
     console.error("Main error:", error)
     throw error 
   } finally {
-    // Safely close the page
+    // Safely close the page and browser
     if (page) {
       try {
         await page.close()
         console.log("Page closed successfully")
       } catch (pageCloseError) {
         console.error("Error closing page:", pageCloseError)
+      }
+    }
+    if (browser) {
+      try {
+        await browser.close()
+        console.log("Browser closed successfully")
+      } catch (browserCloseError) {
+        console.error("Error closing browser:", browserCloseError)
       }
     }
   }
@@ -524,33 +501,6 @@ async function onCaptchaFinished(promise, timeout = 360_000) {
   }
 }
 
-// Function to close browser safely
-async function closeBrowser() {
-  if (browser) {
-    try {
-      await browser.close()
-      console.log("Browser closed successfully")
-    } catch (error) {
-      console.error("Error closing browser:", error.message)
-    } finally {
-      browser = null
-    }
-  }
-}
-
-// Handle process exit to ensure browser is closed
-process.on('exit', () => {
-  if (browser) {
-    console.log("Process exiting, attempting to close browser")
-    // Can't use async here, so use sync operations
-    try {
-      browser.disconnect()
-    } catch (e) {
-      console.error("Error disconnecting browser on exit:", e.message)
-    }
-  }
-})
-
 // Export the main scraping function
 export { scrapeAxsTickets };
 
@@ -569,10 +519,6 @@ async function runExample() {
     })
   } catch (error) {
     console.error("Error in example:", error)
-  } finally {
-    // Close the browser at the end of our script
-    await closeBrowser()
-    console.log("Browser closed")
   }
 }
 

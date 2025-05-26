@@ -1,21 +1,15 @@
 import puppeteer from "puppeteer-core"
-import { fileURLToPath } from 'url'
-import { dirname } from 'path'
 import fs from 'fs/promises'
 // Import the parsing functions
 import { parseAXSTickets } from './parse_tickets.js'
 import { randomUUID } from "crypto"
-
-// Get current file directory path
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
 
 const initBrowser = async () => {
   try {
     const query = new URLSearchParams({
       token: process.env.SCRAPELESS_TOKEN,
       proxy_country: "US",
-      session_recording: true,
+      session_recording: false,
       session_ttl: 900,
       session_name: randomUUID(), // Generate unique session name for each request
     })

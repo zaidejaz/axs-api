@@ -4,6 +4,39 @@ import fs from 'fs/promises'
 import { parseAXSTickets } from './parse_tickets.js'
 import { randomUUID } from "crypto"
 
+// Custom error classes for better error handling
+class ScraperBlockedError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ScraperBlockedError';
+    this.needsSessionClose = true;
+  }
+}
+
+class CaptchaTimeoutError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'CaptchaTimeoutError';
+    this.needsSessionClose = true;
+  }
+}
+
+class BrowserConnectionError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'BrowserConnectionError';
+    this.needsSessionClose = false; // Browser never connected
+  }
+}
+
+class DataCaptureError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'DataCaptureError';
+    this.needsSessionClose = true;
+  }
+}
+
 const initBrowser = async () => {
   try {
     const query = new URLSearchParams({
@@ -24,11 +57,11 @@ const initBrowser = async () => {
       defaultViewport: null,
     })
     
-    // Add a timeout for browser connection
+    // Add a timeout for browser connection (reduced from 30s to 15s)
     const timeoutPromise = new Promise((_, reject) => {
       setTimeout(() => {
-        reject(new Error('Browser connection timeout after 30 seconds'))
-      }, 30000)
+        reject(new BrowserConnectionError('Browser connection timeout after 15 seconds'))
+      }, 15000)
     })
     
     // Race the connection against the timeout
@@ -38,7 +71,10 @@ const initBrowser = async () => {
     return browser
   } catch (error) {
     console.error("Error initializing browser:", error)
-    throw new Error(`Browser connection failed: ${error.message}`)
+    if (error instanceof BrowserConnectionError) {
+      throw error;
+    }
+    throw new BrowserConnectionError(`Browser connection failed: ${error.message}`)
   }
 }
 
@@ -46,6 +82,16 @@ const initBrowser = async () => {
 async function scrapeAxsTickets(url) {
   let browser = null
   let page = null
+  const startTime = Date.now();
+  const MAX_SESSION_TIME = 5 * 60 * 1000; // 5 minutes
+  const CAPTCHA_TIMEOUT = 60 * 1000; // 60 seconds
+  
+  // Helper function to check if we've exceeded max session time
+  const checkSessionTimeout = () => {
+    if (Date.now() - startTime > MAX_SESSION_TIME) {
+      throw new DataCaptureError("Session timeout: Maximum 5 minutes exceeded");
+    }
+  };
   
   try {
     // Create new browser instance for this request
@@ -156,30 +202,6 @@ async function scrapeAxsTickets(url) {
       allResponsesResolve = resolve
     })
     
-    // Create a promise to wait for the specific pre-flow request to detect captcha solve
-    const preFlowRequestPromise = new Promise(resolve => {
-      page.on('request', request => {
-        if (request.url().includes('/veritix/pre-flow/v2/')) {
-          console.log('🎉 Pre-flow request detected: Captcha solved!')
-          console.log('Request URL:', request.url())
-          resolve(request)
-        }
-      })
-    })
-    
-    // Listen for captcha events using native promise resolve (keeping as fallback)
-    const captchaPromise = addCaptchaListener(page)
-    
-    // Create a promise with timeout for capturing all responses
-    const captureWithTimeout = (timeoutMs = 180000) => {
-      return Promise.race([
-        allResponsesCapturedPromise,
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error("Timeout waiting for all responses")), timeoutMs)
-        )
-      ])
-    }
-    
     // Alternative method to capture responses via CDP
     const setupCDPNetworkMonitoring = async () => {
       try {
@@ -244,58 +266,134 @@ async function scrapeAxsTickets(url) {
     await setupCDPNetworkMonitoring()
     
     console.log("Navigating to URL:", url)
-    await page.goto(url, { timeout: 30000, waitUntil: "load" })
-    
-    // Wait for either the pre-flow request or the captcha solve event
-    console.log("Waiting for captcha to be solved (monitoring pre-flow request)...")
+    checkSessionTimeout(); // Check before navigation
     
     try {
-      await Promise.race([
-        preFlowRequestPromise,
-        onCaptchaFinished(captchaPromise)
-      ]);
-      console.log("Captcha solved or pre-flow detected - continuing with browsing operations");
-    } catch (captchaError) {
-      console.log("Captcha handling error:", captchaError.message || captchaError);
-      console.log("Continuing anyway - will try to proceed with page operations");
+      await page.goto(url, { timeout: 30000, waitUntil: "load" })
+    } catch (navigationError) {
+      throw new DataCaptureError(`Failed to navigate to URL: ${navigationError.message}`)
+    }
+    
+    // Main retry loop for captcha and data capture
+    let captchaRetries = 0;
+    const maxCaptchaRetries = 3;
+    
+    while (captchaRetries < maxCaptchaRetries) {
+      checkSessionTimeout(); // Check before each retry
+      
+      console.log(`Captcha attempt ${captchaRetries + 1}/${maxCaptchaRetries}`);
+      
+      // Create a promise to wait for the specific pre-flow request to detect captcha solve
+      const preFlowRequestPromise = new Promise(resolve => {
+        const handler = (request) => {
+          if (request.url().includes('/veritix/pre-flow/v2/')) {
+            console.log('🎉 Pre-flow request detected: Captcha solved!')
+            console.log('Request URL:', request.url())
+            page.off('request', handler); // Remove listener
+            resolve(request)
+          }
+        };
+        page.on('request', handler);
+      });
+      
+      // Listen for captcha events using native promise resolve
+      const captchaPromise = addCaptchaListener(page)
+      
+      // Wait for captcha to be solved with 60s timeout
+      console.log("Waiting for captcha to be solved...")
+      
+      try {
+        await Promise.race([
+          preFlowRequestPromise,
+          onCaptchaFinished(captchaPromise, CAPTCHA_TIMEOUT),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error("Captcha timeout")), CAPTCHA_TIMEOUT)
+          )
+        ]);
+        console.log("Captcha solved - continuing with data capture");
+        break; // Exit retry loop if captcha is solved
+      } catch (captchaError) {
+        captchaRetries++;
+        console.log(`Captcha attempt ${captchaRetries} failed:`, captchaError.message);
+        
+        if (captchaRetries >= maxCaptchaRetries) {
+          throw new CaptchaTimeoutError(`Failed to solve captcha after ${maxCaptchaRetries} attempts`);
+        }
+        
+        // Check for blocking modal before retrying
+        try {
+          const blockingModal = await page.$('.modal-header h1#title');
+          if (blockingModal) {
+            const modalText = await page.evaluate(el => el.textContent, blockingModal);
+            if (modalText.includes('Oh no!')) {
+              console.error("❌ Scraper has been blocked - detected blocking modal");
+              throw new ScraperBlockedError("Scraper has been blocked by AXS");
+            }
+          }
+        } catch (modalError) {
+          console.log("Error checking for blocking modal:", modalError.message);
+        }
+        
+        // Refresh page for next attempt
+        console.log("Refreshing page for next captcha attempt...");
+        try {
+          await page.reload({ waitUntil: "load", timeout: 30000 });
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2s after reload
+        } catch (reloadError) {
+          console.log("Error reloading page:", reloadError.message);
+        }
+      }
+    }
+    
+    // Now try to capture data with remaining time
+    checkSessionTimeout();
+    
+    const remainingTime = MAX_SESSION_TIME - (Date.now() - startTime);
+    const dataTimeout = Math.max(remainingTime - 5000, 10000); // Leave 5s buffer, minimum 10s
+    
+    console.log(`Attempting data capture with ${Math.round(dataTimeout/1000)}s timeout...`);
+    
+    // Create a promise with timeout for capturing all responses
+    const captureWithTimeout = (timeoutMs) => {
+      return Promise.race([
+        allResponsesCapturedPromise,
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new DataCaptureError("Timeout waiting for all responses")), timeoutMs)
+        )
+      ])
     }
     
     try {
-      // First try: Check if all three responses are captured immediately after captcha
-      console.log("Checking if responses are available after initial captcha solve...")
-      await captureWithTimeout(15000).catch(async () => {
-        console.log("Not all responses available yet. Proceeding with refresh...")
+      // Try to capture responses immediately with short timeout first
+      await captureWithTimeout(10000).catch(async () => {
+        console.log("Initial capture failed, trying refresh approach...");
+        checkSessionTimeout();
         
-        console.log("Page loaded...")
-        
-        // Wait a moment for the page to fully render post-captcha
-        console.log("Waiting for header to load...")
-        await page.waitForSelector(".header", { timeout: 10000 }).catch(err => {
+        // Wait for header to load
+        await page.waitForSelector(".header", { timeout: 5000 }).catch(err => {
           console.log("Header wait error (continuing anyway):", err.message)
         })
 
-        // Check for blocking modal
+        // Check for blocking modal one more time
         const blockingModal = await page.$('.modal-header h1#title');
         if (blockingModal) {
           const modalText = await page.evaluate(el => el.textContent, blockingModal);
           if (modalText.includes('Oh no!')) {
             console.error("❌ Scraper has been blocked - detected blocking modal");
-            throw new Error("Scraper has been blocked by AXS");
+            throw new ScraperBlockedError("Scraper has been blocked by AXS");
           }
         }
         
-        console.log("Looking for and trying to click the Refresh button...")
-        
-        // Try different selectors to find the Refresh button
+        // Try to find and click refresh button
         let buttonClicked = false
         
         try {
-          await page.waitForSelector(".sc-hzyFKJ", { timeout: 5000 })
+          await page.waitForSelector(".sc-hzyFKJ", { timeout: 3000 })
           await page.click(".sc-hzyFKJ")
-          console.log("Button clicked using first selector")
+          console.log("Refresh button clicked")
           buttonClicked = true
         } catch (selectorError) {
-          console.log("First selector failed, trying alternative approach...")
+          console.log("Primary refresh button not found, trying alternative...")
         }
         
         if (!buttonClicked) {
@@ -306,7 +404,7 @@ async function scrapeAxsTickets(url) {
             const textContent = await page.evaluate(el => el.textContent, button)
             if (textContent && textContent.toLowerCase().includes('refresh')) {
               await button.click()
-              console.log("Found and clicked button with 'refresh' text")
+              console.log("Found and clicked refresh button by text")
               buttonClicked = true
               break
             }
@@ -314,82 +412,26 @@ async function scrapeAxsTickets(url) {
         }
         
         if (!buttonClicked) {
-          console.log("Could not find refresh button - trying to reload the page")
+          console.log("No refresh button found, reloading page...")
           await page.reload({ waitUntil: "networkidle2" })
         }
         
-        // Now wait for responses after refresh (with longer timeout)
-        console.log("Waiting for target responses after page refresh...")
-        return captureWithTimeout(120000)
+        // Wait for responses after refresh with remaining session time
+        const finalRemainingTime = MAX_SESSION_TIME - (Date.now() - startTime);
+        const finalTimeout = Math.max(finalRemainingTime - 5000, 10000); // Leave 5s buffer, minimum 10s
+        console.log(`Waiting for responses with ${Math.round(finalTimeout/1000)}s timeout (remaining session time)...`);
+        return captureWithTimeout(finalTimeout)
       })
       
       console.log("✅ Successfully captured all required responses!")
     } catch (timeoutError) {
-      console.log("⚠️ Timed out waiting for all responses. Saving what we have...")
-      
-      // Log what requests were seen but responses not captured
-      console.log("DEBUG: Checking for missing responses...")
-      
-      // Check which inventory requests didn't have matching responses captured
-      for (const req of inventoryRequests) {
-        for (const target of targetEndpoints) {
-          const patternParts = target.pattern.split('*')
-          const matches = patternParts.every(part => req.url.includes(part))
-          
-          if (matches && !capturedResponses.has(target.filename)) {
-            console.log(`⚠️ Found request for ${target.filename} but response was not captured: ${req.url}`)
-            
-            // Check if we actually have this response in our inventory responses Map
-            if (inventoryResponses.has(req.url)) {
-              console.log(`🔄 Found response in inventory responses, attempting recovery...`)
-              const responseText = inventoryResponses.get(req.url)
-              
-              try {
-                const responseJson = JSON.parse(responseText)
-                console.log(`🔄 Recovered response for: ${target.filename}`)
-                capturedResponses.set(target.filename, responseJson)
-              } catch (jsonError) {
-                console.log(`⚠️ Recovered response for ${target.filename} is not valid JSON`)
-                capturedResponses.set(target.filename, responseText)
-              }
-            }
-          }
-        }
+      if (timeoutError instanceof DataCaptureError || timeoutError instanceof ScraperBlockedError) {
+        throw timeoutError;
       }
+      throw new DataCaptureError("Failed to capture required data within timeout");
     }
     
-    // Save all captured responses before exiting
-    for (const [filename, responseData] of capturedResponses.entries()) {
-      try {
-        await fs.writeFile(filename + '.json', JSON.stringify(responseData, null, 2))
-        console.log(`Saved captured response to ${filename}.json`)
-      } catch (writeError) {
-        console.error(`Error saving response to ${filename}:`, writeError)
-      }
-    }
-    
-    // Save inventory responses to a debug file
-    try {
-      const inventoryResponseData = {}
-      for (const [url, responseText] of inventoryResponses.entries()) {
-        try {
-          inventoryResponseData[url] = JSON.parse(responseText)
-        } catch (e) {
-          // If not valid JSON, save a truncated version of the raw text
-          inventoryResponseData[url] = { 
-            raw: responseText.substring(0, 500) + "... [truncated]",
-            parseError: e.message
-          }
-        }
-      }
-      
-      await fs.writeFile('inventory_responses_debug.json', JSON.stringify(inventoryResponseData, null, 2))
-      console.log("Saved inventory responses to inventory_responses_debug.json")
-    } catch (debugWriteError) {
-      console.error("Error saving response debug info:", debugWriteError)
-    }
-    
-    // Check which responses we captured in the end
+    // Check which responses we captured
     let allCaptured = true
     for (const target of targetEndpoints) {
       if (!capturedResponses.has(target.filename)) {
@@ -398,10 +440,8 @@ async function scrapeAxsTickets(url) {
       }
     }
     
-    if (allCaptured) {
-      console.log("✅ Successfully captured and saved all required responses!")
-    } else {
-      console.log("⚠️ Some responses could not be captured.")
+    if (!allCaptured) {
+      throw new DataCaptureError("Failed to capture all required responses");
     }
     
     // Create return object with the three responses
@@ -424,22 +464,38 @@ async function scrapeAxsTickets(url) {
           url: url
         })
         
+        console.log(`✅ Successfully scraped ${tickets.length} ticket groups in ${Math.round((Date.now() - startTime)/1000)}s`);
+        
         // Return just the tickets array
         return tickets
         
       } catch (parseError) {
         console.error("Error parsing ticket data:", parseError)
-        throw parseError
+        throw new DataCaptureError(`Failed to parse ticket data: ${parseError.message}`)
       }
     } else {
-      throw new Error("Failed to capture all required data")
+      throw new DataCaptureError("Failed to capture all required data")
     }
     
   } catch (error) {
     console.error("Main error:", error)
-    throw error 
+    
+    // Determine if we need to close the session based on error type
+    const needsSessionClose = error.needsSessionClose !== undefined ? error.needsSessionClose : true;
+    
+    if (needsSessionClose && browser) {
+      console.log("Error requires session closure, closing browser...");
+      try {
+        await browser.close();
+        browser = null;
+      } catch (closeError) {
+        console.error("Error closing browser:", closeError);
+      }
+    }
+    
+    throw error;
   } finally {
-    // Safely close the page and browser
+    // Clean up resources
     if (page) {
       try {
         await page.close()
@@ -482,16 +538,15 @@ async function addCaptchaListener(page) {
   });
 }
 
-async function onCaptchaFinished(promise, timeout = 360_000) {
+async function onCaptchaFinished(promise, timeout = 60000) {
   try {
     return await Promise.race([
       promise, 
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Captcha timeout")), timeout))
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Captcha listener timeout")), timeout))
     ]);
   } catch (error) {
     console.log(`Captcha handler error: ${error.message}`);
-    // Return a fallback value that indicates timeout but doesn't crash the flow
-    return { error: error.message, timedOut: true };
+    throw error;
   }
 }
 

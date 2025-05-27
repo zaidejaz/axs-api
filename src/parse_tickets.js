@@ -11,13 +11,12 @@ const __dirname = dirname(__filename);
  */
 function buildPriceLevelsMap(axsResults) {
   const priceLevelsMap = {};
-  console.log('Building price levels map...');
 
   // Map global fees for easier lookup (from root-level fees array)
   const rootFeeMap = {};
   if (axsResults.price && axsResults.price.fees && Array.isArray(axsResults.price.fees)) {
     for (const fee of axsResults.price.fees) {
-      rootFeeMap[fee.name] = fee;
+      rootFeeMap[fee.id] = fee; // Use fee.id for lookup
     }
   }
 
@@ -36,7 +35,6 @@ function buildPriceLevelsMap(axsResults) {
           if (zonePrice.priceLevels) {
             for (const priceLevel of zonePrice.priceLevels) {
               if (!priceLevel.prices || priceLevel.prices.length === 0) {
-                console.warn(`Price level ${priceLevel.label} (${priceLevel.priceLevelID}) has no detailed prices. Skipping.`);
                 continue;
               }
 
@@ -45,21 +43,19 @@ function buildPriceLevelsMap(axsResults) {
                 label: priceLevel.label,
                 basePrice: 0, // Base Component
                 facilityFee: 0, // VEN_FacFee
-                totalFees: 0, // All applicable fees from root-level
+                totalFees: 0, // All applicable PER-ITEM fees from root-level
                 totalTax: 0, // Calculated tax
-                websiteDisplayPrice: 0,
+                websiteDisplayPrice: 0, // This will be the full calculated price for a single ticket
               };
 
-              // The 'base' field at priceLevel.prices[0] seems to be Base Component + VEN_FacFee
-              // This is the amount *before* the root-level fees and taxes are applied to it.
-              const baseAmountForFeeCalculation = priceLevel.prices[0].base; // e.g., 19950 for PL1
+              const firstPriceEntry = priceLevel.prices[0];
+              const baseAmountForFeeCalculation = firstPriceEntry.base; // e.g., 19950 for PL1 (Base Component + VEN_FacFee)
 
-              // Extract individual price components and identify their taxability
               let baseComponentAmount = 0;
               let venFacFeeAmount = 0;
-              let currentTaxableAmount = 0; // Amount on which tax is applied
+              let currentTaxableAmount = 0; // Amount on which tax is applied (before taxes are calculated)
 
-              const priceComponents = priceLevel.prices[0].priceComponents;
+              const priceComponents = firstPriceEntry.priceComponents;
               if (priceComponents) {
                 for (const comp of priceComponents) {
                   if (comp.name === "Base Component") {
@@ -77,47 +73,51 @@ function buildPriceLevelsMap(axsResults) {
               priceLevelData.basePrice = baseComponentAmount;
               priceLevelData.facilityFee = venFacFeeAmount;
 
-              let totalCalculatedFees = 0; // Sum of all fees (service, convenience, order processing from root-level)
+              let totalCalculatedPerItemFees = 0; // Sum of all PER-ITEM fees
 
-              // --- Process root-level fees ---
-              for (const feeName in rootFeeMap) {
-                const feeDef = rootFeeMap[feeName];
-                // Check if this fee definition applies to the current offer (offerID) or offerGroupID
-                // For simplicity, let's assume it applies to all for now as the 'assignments' array is complex.
-                // Or, more accurately, we'd need to link offerPrice.offerID to fee.assignments.associatedWith.
-                // Given the user's observed "Actual Price" includes these fees, they are likely universally applied or apply to 'Regular' offer.
-                // Let's iterate through its components
-                if (feeDef.components && Array.isArray(feeDef.components)) {
-                  for (const component of feeDef.components) {
-                    let feeComponentAmount = 0;
-                    const priceInDollars = baseAmountForFeeCalculation / 100; // Convert to dollars for lookup ranges
+              // --- Process root-level fees that are assigned to this offer ---
+              if (offerPrice.fees && Array.isArray(offerPrice.fees)) {
+                for (const offerAssignedFee of offerPrice.fees) {
+                  const feeDef = rootFeeMap[offerAssignedFee.id]; // Get the full fee definition from rootFeeMap
 
-                    if (component.calculationMethod === "Lookup" && Array.isArray(component.lookupRanges)) {
-                      // Find the correct amount based on the base price (in dollars)
-                      for (const range of component.lookupRanges) {
-                        if (priceInDollars >= range.start && (range.end === 0 || priceInDollars < range.end)) {
-                          feeComponentAmount = range.amount;
-                          break;
+                  if (feeDef && feeDef.components && Array.isArray(feeDef.components)) {
+                    // Only process fees with applicationMethod "PerItem" for totalCalculatedPerItemFees
+                    if (feeDef.applicationMethod === "PerItem") {
+                      for (const component of feeDef.components) {
+                        let feeComponentAmount = 0;
+                        const priceInDollars = baseAmountForFeeCalculation / 100; // Convert to dollars for lookup ranges
+
+                        if (component.calculationMethod === "Lookup" && Array.isArray(component.lookupRanges)) {
+                          // Find the correct amount based on the base price (in dollars)
+                          for (const range of component.lookupRanges) {
+                            // Handle the case where end is 0 for the last range (e.g., ">301")
+                            if (priceInDollars >= range.start && (range.end === 0 || priceInDollars < range.end)) {
+                              feeComponentAmount = range.amount;
+                              break;
+                            }
+                          }
+                        } else if (component.calculationMethod === "Percentage" && typeof component.rate === 'number') {
+                          feeComponentAmount = (baseAmountForFeeCalculation * component.rate) / 100;
+                          if (typeof component.roundOff === 'number') {
+                            feeComponentAmount = Math.round(feeComponentAmount / component.roundOff) * component.roundOff;
+                          }
+                        } else if (component.calculationMethod === "Fixed" && typeof component.amount === 'number') {
+                          feeComponentAmount = component.amount;
+                        }
+
+                        totalCalculatedPerItemFees += feeComponentAmount;
+
+                        // If this fee component is taxable, add its amount to the taxable sum
+                        if (component.taxIds && component.taxIds.includes("1001")) { // Check for taxId '1001' (LET)
+                          currentTaxableAmount += feeComponentAmount;
                         }
                       }
-                    } else if (component.calculationMethod === "Percentage" && typeof component.rate === 'number') {
-                      feeComponentAmount = (baseAmountForFeeCalculation * component.rate) / 100;
-                      if (typeof component.roundOff === 'number') {
-                        feeComponentAmount = Math.round(feeComponentAmount / component.roundOff) * component.roundOff;
-                      }
-                    }
-
-                    totalCalculatedFees += feeComponentAmount;
-
-                    // If this fee component is taxable, add its amount to the taxable sum
-                    if (component.taxIds && component.taxIds.includes("1001")) { // Check for taxId '1001' (LET)
-                      currentTaxableAmount += feeComponentAmount;
                     }
                   }
                 }
               }
 
-              priceLevelData.totalFees = totalCalculatedFees;
+              priceLevelData.totalFees = totalCalculatedPerItemFees; // This now only includes PerItem fees
 
               // --- Calculate Total Tax ---
               let globalTaxRate = 0;
@@ -129,16 +129,9 @@ function buildPriceLevelsMap(axsResults) {
               priceLevelData.totalTax = (currentTaxableAmount * globalTaxRate) / 100;
 
               // --- Calculate Website Display Price ---
-              // websiteDisplayPrice = (Base Component + VEN_FacFee) + total_calculated_fees + total_tax
-              priceLevelData.websiteDisplayPrice = baseAmountForFeeCalculation + totalCalculatedFees + priceLevelData.totalTax;
+              // websiteDisplayPrice = (Base Component + VEN_FacFee) + total_calculated_per_item_fees + total_tax
+              priceLevelData.websiteDisplayPrice = baseAmountForFeeCalculation + totalCalculatedPerItemFees + priceLevelData.totalTax;
 
-
-              console.log(`Price Level ${priceLevel.label} (${priceLevel.priceLevelID}):`);
-              console.log(`  Base + Fac Fee: $${(baseAmountForFeeCalculation / 100).toFixed(2)}`);
-              console.log(`  Calculated Fees: $${(totalCalculatedFees / 100).toFixed(2)}`);
-              console.log(`  Taxable Amount: $${(currentTaxableAmount / 100).toFixed(2)}`);
-              console.log(`  Total Tax: $${(priceLevelData.totalTax / 100).toFixed(2)} (at ${globalTaxRate}%)`);
-              console.log(`  Website Display Price: $${(priceLevelData.websiteDisplayPrice / 100).toFixed(2)}`);
 
               priceLevelsMap[priceLevel.priceLevelID] = priceLevelData;
             }
@@ -165,11 +158,9 @@ async function parseAXSTickets(axsResults) {
 
     // Build price level mapping with accurate pricing
     const priceLevelsMap = buildPriceLevelsMap(axsResults);
-    console.log(`Found ${Object.keys(priceLevelsMap).length} price levels in price data`);
 
     // If we have detailed offer data, process that for specific seats
     if (axsResults.offerSearch && axsResults.offerSearch.offers) {
-      console.log(`Processing ${axsResults.offerSearch.offers.length} offers with detailed seat information...`);
 
       // Group seats by section, row, and price level
       const sectionRowPriceSeats = {};

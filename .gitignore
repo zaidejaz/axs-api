@@ -5,3 +5,4 @@ sections.json
 offer_search.json
 inventory*.json
 test_parser.js
+tickets.json

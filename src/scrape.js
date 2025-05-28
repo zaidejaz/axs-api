@@ -452,6 +452,46 @@ async function scrapeAxsTickets(url) {
       url: url
     }
     
+    // Debug: Log what we have in capturedResponses
+    console.log("🔍 Debug - capturedResponses keys:", Array.from(capturedResponses.keys()))
+    console.log("🔍 Debug - result object:", {
+      sections: result.sections ? "✅ Present" : "❌ Missing",
+      offerSearch: result.offerSearch ? "✅ Present" : "❌ Missing", 
+      price: result.price ? "✅ Present" : "❌ Missing"
+    })
+    
+    // Save the three responses to separate JSON files for debugging
+    console.log("🔍 Starting to save debug files...")
+    console.log("🔍 Current working directory:", process.cwd())
+    try {
+      if (result.sections) {
+        console.log("🔍 Attempting to save sections.json...")
+        await fs.writeFile('./sections.json', JSON.stringify(result.sections, null, 2))
+        console.log("✅ Saved sections.json")
+      } else {
+        console.log("❌ No sections data to save")
+      }
+      
+      if (result.offerSearch) {
+        console.log("🔍 Attempting to save offer_search.json...")
+        await fs.writeFile('./offer_search.json', JSON.stringify(result.offerSearch, null, 2))
+        console.log("✅ Saved offer_search.json")
+      } else {
+        console.log("❌ No offer_search data to save")
+      }
+      
+      if (result.price) {
+        console.log("🔍 Attempting to save price.json...")
+        await fs.writeFile('./price.json', JSON.stringify(result.price, null, 2))
+        console.log("✅ Saved price.json")
+      } else {
+        console.log("❌ No price data to save")
+      }
+    } catch (saveError) {
+      console.error("❌ Error saving debug files:", saveError.message)
+      console.error("❌ Full error:", saveError)
+    }
+    
     // If we successfully scraped the data, parse the tickets
     if (result.sections && result.offerSearch && result.price) {
       console.log("Parsing ticket data...")
@@ -463,6 +503,8 @@ async function scrapeAxsTickets(url) {
           price: result.price,
           url: url
         })
+
+        fs.writeFile('tickets.json', JSON.stringify(tickets, null, 2))
         
         console.log(`✅ Successfully scraped ${tickets.length} ticket groups in ${Math.round((Date.now() - startTime)/1000)}s`);
         

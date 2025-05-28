@@ -167,22 +167,35 @@ async function parseAXSTickets(axsResults) {
 
       // First pass: Collect all valid seats
       for (const offer of axsResults.offerSearch.offers) {
+        // Filter out FlashSale/resale offers based on offerType
+        // The user explicitly stated they don't want FlashSale or resale seats.
+        // Offers with "seatType": "STANDARD" typically do not have an "offerType" field, or it's not "FLASHSEATS".
+        if (offer.offerType === "FLASHSEATS") {
+          continue;
+        }
+
         if (!offer.items || !Array.isArray(offer.items) || offer.items.length === 0) {
           continue;
         }
 
         for (const item of offer.items) {
           // Skip if not available or if it's accessible/restricted view
-          if (item.statusCodeLabel !== "Available" || 
-              item.attributes?.some(attr => 
-                attr.toLowerCase().includes('restricted') || 
+          if (
+              item.attributes?.some(attr =>
+                attr.toLowerCase().includes('restricted') ||
                 attr.toLowerCase().includes('accessible')
               )) {
             continue;
           }
 
+          // Also filter out 'FLASHSEATS' at the item level, as an additional safeguard.
+          // The user specifically mentioned "FlashSale or resale seats".
+          if (item.seatType && item.seatType.toLowerCase().includes('flashseats')) {
+            continue;
+          }
+
           const key = `${item.sectionID}-${item.rowLabel}-${item.priceLevelID}`;
-          
+
           if (!sectionRowPriceSeats[key]) {
             sectionRowPriceSeats[key] = {
               sectionLabel: item.sectionLabel,
@@ -199,54 +212,58 @@ async function parseAXSTickets(axsResults) {
         }
       }
 
-      // Second pass: Process each section-row group to find valid pairs
+      // Second pass: Process each section-row group to find valid pairs or singles
       for (const key in sectionRowPriceSeats) {
         const groupData = sectionRowPriceSeats[key];
         const priceLevelData = priceLevelsMap[groupData.priceLevelId];
-        
+
         if (!priceLevelData) {
           console.warn(`Price level data not found for ID: ${groupData.priceLevelId}. Skipping seats.`);
           continue;
         }
 
-        // Sort seats by number
+        // Sort seats by number to find consecutive groups
         groupData.seats.sort((a, b) => a.number - b.number);
 
-        // Find consecutive groups
-        const consecutiveGroups = [];
-        let currentGroup = [groupData.seats[0]];
+        const processedSeats = new Set(); // To keep track of seats already added to a ticket
+        let currentTicketGroup = [];
 
-        for (let i = 1; i < groupData.seats.length; i++) {
+        for (let i = 0; i < groupData.seats.length; i++) {
           const currentSeat = groupData.seats[i];
-          const previousSeat = groupData.seats[i - 1];
-
-          if (currentSeat.number === previousSeat.number + 1) {
-            // Seat is consecutive
-            currentGroup.push(currentSeat);
-          } else {
-            // Break in consecutive seats
-            if (currentGroup.length >= 2) {
-              consecutiveGroups.push([...currentGroup]);
-            }
-            currentGroup = [currentSeat];
+          if (processedSeats.has(currentSeat.number)) {
+            continue; // Skip if already processed
           }
-        }
 
-        // Add the last group if it's valid
-        if (currentGroup.length >= 2) {
-          consecutiveGroups.push(currentGroup);
-        }
+          // Start a new potential group with the current seat
+          currentTicketGroup = [currentSeat];
+          processedSeats.add(currentSeat.number);
 
-        // Process consecutive groups
-        for (const seatGroup of consecutiveGroups) {
-          // Process groups of 2-4 seats
-          if (seatGroup.length >= 2) {
-            // Take up to 4 seats
-            const selectedSeats = seatGroup.slice(0, Math.min(4, seatGroup.length));
-            // Calculate prices
+          // Look for consecutive seats up to a total of 4
+          for (let j = i + 1; j < groupData.seats.length && currentTicketGroup.length < 4; j++) {
+            const nextSeat = groupData.seats[j];
+            // Check if the next seat is consecutive and not already processed
+            if (nextSeat.number === currentTicketGroup[currentTicketGroup.length - 1].number + 1 && !processedSeats.has(nextSeat.number)) {
+              currentTicketGroup.push(nextSeat);
+              processedSeats.add(nextSeat.number);
+            } else {
+              // Not consecutive or already processed, break from inner loop
+              break;
+            }
+          }
+
+          // Now, process currentTicketGroup based on its size
+          // The user mentioned "the event i am trying to scrape has only 2 seats".
+          // If there's only one standard seat, currentTicketGroup will have length 1.
+          // If there are two consecutive standard seats, it will have length 2.
+          // If there are more, it will take up to 4.
+
+          // This logic ensures that any available seat (single or part of a consecutive block)
+          // will be considered for a ticket, prioritizing consecutive groups up to 4.
+          if (currentTicketGroup.length > 0) { // Ensure there's something to process
+            const selectedSeats = currentTicketGroup; // This group is already filtered for size (max 4)
             const face_price = priceLevelData.basePrice / 100;
             const taxed_cost = (priceLevelData.totalFees + priceLevelData.totalTax) / 100;
-            const cost = face_price + taxed_cost;
+            const cost = priceLevelData.websiteDisplayPrice / 100; // Use websiteDisplayPrice for total cost
 
             tickets.push({
               section: groupData.sectionLabel,

@@ -39,34 +39,34 @@ class DataCaptureError extends Error {
 
 const initBrowser = async () => {
   try {
-    const query = new URLSearchParams({
+      const query = new URLSearchParams({
       token: process.env.SCRAPELESS_TOKEN,
       proxy_country: "US",
       session_recording: false,
-      session_ttl: 900,
+        session_ttl: 900,
       session_name: randomUUID(), // Generate unique session name for each request
-    })
+      })
 
-    const connectionURL = `wss://browser.scrapeless.com/browser?${query.toString()}`
+      const connectionURL = `wss://browser.scrapeless.com/browser?${query.toString()}`
 
-    console.log("Connecting to browser...")
-    
-    // Add timeout handling for the browser connection
-    const browserPromise = puppeteer.connect({
-      browserWSEndpoint: connectionURL,
-      defaultViewport: null,
-    })
-    
+      console.log("Connecting to browser...")
+      
+      // Add timeout handling for the browser connection
+      const browserPromise = puppeteer.connect({
+        browserWSEndpoint: connectionURL,
+        defaultViewport: null,
+      })
+      
     // Add a timeout for browser connection (reduced from 30s to 15s)
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => {
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => {
         reject(new BrowserConnectionError('Browser connection timeout after 15 seconds'))
       }, 15000)
-    })
-    
-    // Race the connection against the timeout
+      })
+      
+      // Race the connection against the timeout
     const browser = await Promise.race([browserPromise, timeoutPromise])
-    console.log("Browser connected successfully")
+      console.log("Browser connected successfully")
     
     return browser
   } catch (error) {
@@ -269,7 +269,7 @@ async function scrapeAxsTickets(url) {
     checkSessionTimeout(); // Check before navigation
     
     try {
-      await page.goto(url, { timeout: 30000, waitUntil: "load" })
+    await page.goto(url, { timeout: 30000, waitUntil: "load" })
     } catch (navigationError) {
       throw new DataCaptureError(`Failed to navigate to URL: ${navigationError.message}`)
     }
@@ -301,18 +301,18 @@ async function scrapeAxsTickets(url) {
       
       // Wait for captcha to be solved with 60s timeout
       console.log("Waiting for captcha to be solved...")
-      
-      try {
-        await Promise.race([
-          preFlowRequestPromise,
+    
+    try {
+      await Promise.race([
+        preFlowRequestPromise,
           onCaptchaFinished(captchaPromise, CAPTCHA_TIMEOUT),
           new Promise((_, reject) => 
             setTimeout(() => reject(new Error("Captcha timeout")), CAPTCHA_TIMEOUT)
           )
-        ]);
+      ]);
         console.log("Captcha solved - continuing with data capture");
         break; // Exit retry loop if captcha is solved
-      } catch (captchaError) {
+    } catch (captchaError) {
         captchaRetries++;
         console.log(`Captcha attempt ${captchaRetries} failed:`, captchaError.message);
         
@@ -373,7 +373,7 @@ async function scrapeAxsTickets(url) {
         await page.waitForSelector(".header", { timeout: 5000 }).catch(err => {
           console.log("Header wait error (continuing anyway):", err.message)
         })
-
+        
         // Check for blocking modal one more time
         const blockingModal = await page.$('.modal-header h1#title');
         if (blockingModal) {

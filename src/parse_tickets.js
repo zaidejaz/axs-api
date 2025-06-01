@@ -46,10 +46,15 @@ function buildPriceLevelsMap(axsResults) {
                 totalFees: 0, // All applicable PER-ITEM fees from root-level
                 totalTax: 0, // Calculated tax
                 websiteDisplayPrice: 0, // This will be the full calculated price for a single ticket
+                priceTypeID: null, // Store priceTypeID for dynamic pricing lookup
+                rawDynamicPrices: zonePrice.rawDynamicPrices || {}, // Store dynamic prices for this zone
               };
 
               const firstPriceEntry = priceLevel.prices[0];
               const baseAmountForFeeCalculation = firstPriceEntry.base; // e.g., 19950 for PL1 (Base Component + VEN_FacFee)
+              
+              // Store the priceTypeID from the first price entry
+              priceLevelData.priceTypeID = firstPriceEntry.priceTypeID;
 
               let baseComponentAmount = 0;
               let venFacFeeAmount = 0;
@@ -132,7 +137,6 @@ function buildPriceLevelsMap(axsResults) {
               // websiteDisplayPrice = (Base Component + VEN_FacFee) + total_calculated_per_item_fees + total_tax
               priceLevelData.websiteDisplayPrice = baseAmountForFeeCalculation + totalCalculatedPerItemFees + priceLevelData.totalTax;
 
-
               priceLevelsMap[priceLevel.priceLevelID] = priceLevelData;
             }
           }
@@ -142,6 +146,71 @@ function buildPriceLevelsMap(axsResults) {
   }
 
   return priceLevelsMap;
+}
+
+/**
+ * Helper function to get dynamic price for a specific seat
+ * @param {Object} priceLevelData Price level data containing rawDynamicPrices
+ * @param {string} sectionID Section ID
+ * @param {string} rowID Row ID  
+ * @param {string} seatId Seat ID (not displayOrder!)
+ * @returns {number|null} Dynamic price in cents or null if not found
+ */
+function getDynamicPrice(priceLevelData, sectionID, rowID, seatId) {
+  if (!priceLevelData.rawDynamicPrices || !priceLevelData.priceTypeID) {
+    return null;
+  }
+
+  // Build the dynamic price key: priceTypeID-sectionID-rowID-seatId-priceLevelID
+  const dynamicPriceKey = `${priceLevelData.priceTypeID}-${sectionID}-${rowID}-${seatId}-${priceLevelData.priceLevelID}`;
+  
+  return priceLevelData.rawDynamicPrices[dynamicPriceKey] || null;
+}
+
+/**
+ * Helper function to calculate pricing for a specific seat with dynamic pricing support
+ * @param {Object} priceLevelData Base price level data
+ * @param {string} sectionID Section ID
+ * @param {string} rowID Row ID
+ * @param {string} seatId Seat ID
+ * @param {Object} rootFeeMap Map of fees
+ * @param {Object} taxMap Map of taxes
+ * @returns {Object} Calculated pricing for the specific seat
+ */
+function calculateSeatPricing(priceLevelData, sectionID, rowID, seatId, rootFeeMap, taxMap) {
+  // Check if there's a dynamic price for this specific seat
+  const dynamicPrice = getDynamicPrice(priceLevelData, sectionID, rowID, seatId);
+  
+  let baseAmountForCalculation;
+  let baseComponentAmount;
+  let venFacFeeAmount = priceLevelData.facilityFee;
+  
+  if (dynamicPrice !== null) {
+    // Use dynamic price as the total base amount (this replaces both base component + facility fee)
+    baseAmountForCalculation = dynamicPrice;
+    baseComponentAmount = dynamicPrice - venFacFeeAmount; // Subtract facility fee to get base component
+  } else {
+    // Use regular pricing
+    baseAmountForCalculation = priceLevelData.basePrice + priceLevelData.facilityFee;
+    baseComponentAmount = priceLevelData.basePrice;
+  }
+
+  // For fees and taxes, use the pre-calculated values from priceLevelData
+  // This maintains consistency with the original calculation method
+  const totalCalculatedPerItemFees = priceLevelData.totalFees;
+  const totalTax = priceLevelData.totalTax;
+  
+  // Calculate final price
+  const websiteDisplayPrice = baseAmountForCalculation + totalCalculatedPerItemFees + totalTax;
+
+  return {
+    basePrice: baseComponentAmount,
+    facilityFee: venFacFeeAmount,
+    totalFees: totalCalculatedPerItemFees,
+    totalTax: totalTax,
+    websiteDisplayPrice: websiteDisplayPrice,
+    isDynamicPricing: dynamicPrice !== null
+  };
 }
 
 /**
@@ -159,6 +228,21 @@ async function parseAXSTickets(axsResults) {
     // Build price level mapping with accurate pricing
     const priceLevelsMap = buildPriceLevelsMap(axsResults);
 
+    // Map global fees and taxes for seat-specific calculations
+    const rootFeeMap = {};
+    if (axsResults.price && axsResults.price.fees && Array.isArray(axsResults.price.fees)) {
+      for (const fee of axsResults.price.fees) {
+        rootFeeMap[fee.id] = fee;
+      }
+    }
+
+    const taxMap = {};
+    if (axsResults.price && axsResults.price.taxes && Array.isArray(axsResults.price.taxes)) {
+      for (const tax of axsResults.price.taxes) {
+        taxMap[tax.id] = tax;
+      }
+    }
+
     // If we have detailed offer data, process that for specific seats
     if (axsResults.offerSearch && axsResults.offerSearch.offers) {
 
@@ -168,8 +252,6 @@ async function parseAXSTickets(axsResults) {
       // First pass: Collect all valid seats
       for (const offer of axsResults.offerSearch.offers) {
         // Filter out FlashSale/resale offers based on offerType
-        // The user explicitly stated they don't want FlashSale or resale seats.
-        // Offers with "seatType": "STANDARD" typically do not have an "offerType" field, or it's not "FLASHSEATS".
         if (offer.offerType === "FLASHSEATS") {
           continue;
         }
@@ -180,34 +262,39 @@ async function parseAXSTickets(axsResults) {
 
         for (const item of offer.items) {
           // Skip if not available or if it's accessible/restricted view
-          if (
-              item.attributes?.some(attr =>
-                attr.toLowerCase().includes('restricted') ||
-                attr.toLowerCase().includes('accessible')
-              )) {
+          if (item.statusCodeLabel && item.statusCodeLabel.toLowerCase() === "accessible") {
             continue;
           }
 
-          // Also filter out 'FLASHSEATS' at the item level, as an additional safeguard.
-          // The user specifically mentioned "FlashSale or resale seats".
+          if (item.attributes?.some(attr =>
+              attr.toLowerCase().includes('restricted') ||
+              attr.toLowerCase().includes('accessible')
+            )) {
+            continue;
+          }
+
           if (item.seatType && item.seatType.toLowerCase().includes('flashseats')) {
             continue;
           }
 
-          const key = `${item.sectionID}-${item.rowLabel}-${item.priceLevelID}`;
+          const key = `${item.sectionID}-${item.rowLabel}`;
 
           if (!sectionRowPriceSeats[key]) {
             sectionRowPriceSeats[key] = {
               sectionLabel: item.sectionLabel,
+              sectionID: item.sectionID,
               rowLabel: item.rowLabel,
-              priceLevelId: item.priceLevelID,
+              rowID: item.rowID,
               seats: []
             };
           }
 
           sectionRowPriceSeats[key].seats.push({
             number: parseInt(item.number),
-            offerId: offer.offerID
+            displayOrder: item.displayOrder,
+            seatId: item.id, // Use seat ID for dynamic pricing lookup
+            offerId: offer.offerID,
+            priceLevelId: item.priceLevelID
           });
         }
       }
@@ -215,66 +302,135 @@ async function parseAXSTickets(axsResults) {
       // Second pass: Process each section-row group to find valid pairs or singles
       for (const key in sectionRowPriceSeats) {
         const groupData = sectionRowPriceSeats[key];
-        const priceLevelData = priceLevelsMap[groupData.priceLevelId];
 
-        if (!priceLevelData) {
-          console.warn(`Price level data not found for ID: ${groupData.priceLevelId}. Skipping seats.`);
+        // Group seats by price level within this section-row
+        const seatsByPriceLevel = {};
+        for (const seat of groupData.seats) {
+          if (!seatsByPriceLevel[seat.priceLevelId]) {
+            seatsByPriceLevel[seat.priceLevelId] = [];
+          }
+          seatsByPriceLevel[seat.priceLevelId].push(seat);
+        }
+
+        // Find the price level with the most seats (or lowest price if tied)
+        let bestPriceLevelId = null;
+        let maxSeats = 0;
+        let lowestPrice = Infinity;
+
+        for (const priceLevelId in seatsByPriceLevel) {
+          const seats = seatsByPriceLevel[priceLevelId];
+          const priceLevelData = priceLevelsMap[priceLevelId];
+          
+          if (!priceLevelData) {
+            continue;
+          }
+
+          // Calculate average price for this price level (considering dynamic pricing)
+          let totalPrice = 0;
+          for (const seat of seats) {
+            const seatPricing = calculateSeatPricing(
+              priceLevelData, 
+              groupData.sectionID, 
+              groupData.rowID, 
+              seat.seatId, 
+              rootFeeMap, 
+              taxMap
+            );
+            totalPrice += seatPricing.websiteDisplayPrice;
+          }
+          const averagePrice = totalPrice / seats.length / 100; // Convert to dollars
+          
+          // Prefer price level with more seats, or lower average price if same number of seats
+          if (seats.length > maxSeats || (seats.length === maxSeats && averagePrice < lowestPrice)) {
+            bestPriceLevelId = priceLevelId;
+            maxSeats = seats.length;
+            lowestPrice = averagePrice;
+          }
+        }
+
+        if (!bestPriceLevelId) {
+          console.warn(`No valid price level found for section-row: ${groupData.sectionLabel} ${groupData.rowLabel}`);
           continue;
         }
 
+        const selectedSeats = seatsByPriceLevel[bestPriceLevelId];
+        const priceLevelData = priceLevelsMap[bestPriceLevelId];
+
         // Sort seats by number to find consecutive groups
-        groupData.seats.sort((a, b) => a.number - b.number);
+        selectedSeats.sort((a, b) => a.number - b.number);
 
-        const processedSeats = new Set(); // To keep track of seats already added to a ticket
-        let currentTicketGroup = [];
+        // Find the best consecutive group (largest group, 2-4 seats only)
+        let bestGroup = [];
+        let currentGroup = [];
 
-        for (let i = 0; i < groupData.seats.length; i++) {
-          const currentSeat = groupData.seats[i];
-          if (processedSeats.has(currentSeat.number)) {
-            continue; // Skip if already processed
-          }
-
-          // Start a new potential group with the current seat
-          currentTicketGroup = [currentSeat];
-          processedSeats.add(currentSeat.number);
-
-          // Look for consecutive seats up to a total of 4
-          for (let j = i + 1; j < groupData.seats.length && currentTicketGroup.length < 4; j++) {
-            const nextSeat = groupData.seats[j];
-            // Check if the next seat is consecutive and not already processed
-            if (nextSeat.number === currentTicketGroup[currentTicketGroup.length - 1].number + 1 && !processedSeats.has(nextSeat.number)) {
-              currentTicketGroup.push(nextSeat);
-              processedSeats.add(nextSeat.number);
+        for (let i = 0; i < selectedSeats.length; i++) {
+          const currentSeat = selectedSeats[i];
+          
+          if (currentGroup.length === 0) {
+            // Start new group
+            currentGroup = [currentSeat];
+          } else {
+            const lastSeat = currentGroup[currentGroup.length - 1];
+            if (currentSeat.number === lastSeat.number + 1 && currentGroup.length < 4) {
+              // Consecutive seat, add to current group (max 4 seats)
+              currentGroup.push(currentSeat);
             } else {
-              // Not consecutive or already processed, break from inner loop
-              break;
+              // Not consecutive or group is full, check if current group is better than best
+              // Only consider groups with 2-4 seats
+              if (currentGroup.length >= 2 && currentGroup.length > bestGroup.length) {
+                bestGroup = [...currentGroup];
+              }
+              // Start new group with current seat
+              currentGroup = [currentSeat];
             }
           }
+        }
 
-          // Now, process currentTicketGroup based on its size
-          // The user mentioned "the event i am trying to scrape has only 2 seats".
-          // If there's only one standard seat, currentTicketGroup will have length 1.
-          // If there are two consecutive standard seats, it will have length 2.
-          // If there are more, it will take up to 4.
+        // Check the last group - only consider groups with 2-4 seats
+        if (currentGroup.length >= 2 && currentGroup.length > bestGroup.length) {
+          bestGroup = [...currentGroup];
+        }
 
-          // This logic ensures that any available seat (single or part of a consecutive block)
-          // will be considered for a ticket, prioritizing consecutive groups up to 4.
-          if (currentTicketGroup.length > 0) { // Ensure there's something to process
-            const selectedSeats = currentTicketGroup; // This group is already filtered for size (max 4)
-            const face_price = priceLevelData.basePrice / 100;
-            const taxed_cost = (priceLevelData.totalFees + priceLevelData.totalTax) / 100;
-            const cost = priceLevelData.websiteDisplayPrice / 100; // Use websiteDisplayPrice for total cost
+        // Only create ticket entry if we have a valid group of 2-4 seats
+        if (bestGroup.length >= 2) {
+          // Calculate pricing for the first seat in the group (representative pricing)
+          const firstSeat = bestGroup[0];
+          
+          const seatPricing = calculateSeatPricing(
+            priceLevelData, 
+            groupData.sectionID, 
+            groupData.rowID, 
+            firstSeat.seatId, 
+            rootFeeMap, 
+            taxMap
+          );
 
-            tickets.push({
-              section: groupData.sectionLabel,
-              row: groupData.rowLabel,
-              seats: selectedSeats.map(s => s.number).join(','),
-              quantity: selectedSeats.length,
-              face_price: parseFloat(face_price.toFixed(2)),
-              taxed_cost: parseFloat(taxed_cost.toFixed(2)),
-              cost: parseFloat(cost.toFixed(2))
-            });
+          // Get the connection fee for the current section
+          const sectionData = axsResults.sections[groupData.sectionLabel];
+          let connectionFee = 0;
+          if (sectionData && typeof sectionData.connectionFee === 'number') {
+            connectionFee = sectionData.connectionFee;
           }
+
+          // Calculate final prices with proper conversion and rounding
+          const face_price = parseFloat(((seatPricing.basePrice + seatPricing.facilityFee) / 100).toFixed(2));
+          const taxed_cost = parseFloat(((seatPricing.totalFees + seatPricing.totalTax) / 100).toFixed(2));
+          const connection_fee_dollars = parseFloat((connectionFee / 100).toFixed(2));
+          
+          // Cost should be exactly face_price + taxed_cost + connection_fee
+          const cost = parseFloat((face_price + taxed_cost + connection_fee_dollars).toFixed(2));
+
+          tickets.push({
+            section: groupData.sectionLabel,
+            row: groupData.rowLabel,
+            seats: bestGroup.map(s => s.number).join(','),
+            quantity: bestGroup.length,
+            face_price: face_price,
+            taxed_cost: taxed_cost,
+            cost: cost,
+            isDynamicPricing: seatPricing.isDynamicPricing,
+            connection_fee: connection_fee_dollars // Add this for debugging
+          });
         }
       }
     }
